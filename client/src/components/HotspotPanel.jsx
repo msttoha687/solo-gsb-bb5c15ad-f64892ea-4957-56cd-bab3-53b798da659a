@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeHotspots } from "../api.js";
 
 // Keep in sync with MAX_SAMPLES in server/hotspot.js.
@@ -21,49 +21,87 @@ function clusterKey(cluster) {
 export default function HotspotPanel({ schema, target = "infer" }) {
   const [text, setText] = useState("");
   const [parseError, setParseError] = useState(null);
-  const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
+  // The outcome is stored together with a signature of the inputs it was
+  // produced from (sample-array text + active contract), the same convention
+  // as the contribution / variant analyses.
+  const [outcome, setOutcome] = useState(null); // { signature, ok, data?, message? }
   const [openKey, setOpenKey] = useState(null);
+  // Monotonic id of the latest submitted request; bumped whenever the inputs
+  // change so a late response from an outdated request is ignored.
+  const requestSeq = useRef(0);
 
-  // Schema changed (re-inferred, or the validate target switched): the
-  // previous clusters no longer reflect the current contract, so drop them.
+  // Signature of the inputs a cluster result applies to: the sample-array
+  // text and the active contract (schema already reflects the validate
+  // target). Editing the samples, re-inferring the schema or switching the
+  // validate target changes it.
+  const signature = useMemo(() => JSON.stringify([text, schema]), [text, schema]);
+
+  // Inputs changed: any in-flight request is now outdated — bump the sequence
+  // so its late response (success or failure) is dropped instead of
+  // backfilling stale clusters, and reset the busy indicator / expanded row.
   useEffect(() => {
-    setResult(null);
-    setError(null);
+    requestSeq.current += 1;
+    setBusy(false);
     setOpenKey(null);
-  }, [schema]);
+  }, [signature]);
+
+  // Derived invalidation: only the outcome whose signature matches the
+  // current inputs is shown; a stale outcome stops rendering immediately and
+  // an explicit hint asks for a re-run.
+  const current = outcome && outcome.signature === signature ? outcome : null;
+  const invalidated = outcome !== null && outcome.signature !== signature;
+  const result = current && current.ok ? current.data : null;
+  const error = current && !current.ok ? current.message : null;
 
   async function runAnalysis() {
-    setError(null);
-    setResult(null);
+    setParseError(null);
     setOpenKey(null);
     let samples;
     try {
       samples = JSON.parse(text);
-      setParseError(null);
     } catch (e) {
       setParseError(e.message);
       return;
     }
+    const runSignature = signature;
     if (!Array.isArray(samples)) {
-      setError('输入必须是 JSON 数组：每个元素为一条待检样本，例如 [{"id": 1}, {"id": 2}]。');
+      setOutcome({
+        signature: runSignature,
+        ok: false,
+        message: '输入必须是 JSON 数组：每个元素为一条待检样本，例如 [{"id": 1}, {"id": 2}]。',
+      });
       return;
     }
     if (samples.length > MAX_SAMPLES) {
-      setError(
-        `单次最多分析 ${MAX_SAMPLES} 条样本，当前输入共 ${samples.length} 条，请分批分析。`
-      );
+      setOutcome({
+        signature: runSignature,
+        ok: false,
+        message: `单次最多分析 ${MAX_SAMPLES} 条样本，当前输入共 ${samples.length} 条，请分批分析。`,
+      });
       return;
     }
+    const seq = ++requestSeq.current;
     setBusy(true);
     try {
-      setResult(await analyzeHotspots(schema, samples));
+      const data = await analyzeHotspots(schema, samples);
+      // Inputs changed or a newer request was submitted meanwhile: this
+      // response no longer reflects the current inputs, so drop it.
+      if (requestSeq.current !== seq) return;
+      setOutcome({ signature: runSignature, ok: true, data });
     } catch (e) {
-      setError(e.message);
+      if (requestSeq.current !== seq) return;
+      setOutcome({ signature: runSignature, ok: false, message: e.message });
     } finally {
-      setBusy(false);
+      if (requestSeq.current === seq) setBusy(false);
     }
+  }
+
+  function handleTextChange(e) {
+    setText(e.target.value);
+    // The parse error describes the previously submitted text; clear it as
+    // soon as the text is edited so it is not mistaken for the new content.
+    setParseError(null);
   }
 
   function toggle(key) {
@@ -84,7 +122,7 @@ export default function HotspotPanel({ schema, target = "infer" }) {
       <textarea
         className={`code-input ${parseError ? "code-input--err" : ""}`}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={handleTextChange}
         spellCheck={false}
         rows={6}
         placeholder='[{"id": 1, "tags": ["admin"]}, {"id": "oops", "tags": [42]}]'
@@ -101,6 +139,11 @@ export default function HotspotPanel({ schema, target = "infer" }) {
           {busy ? "分析中…" : "分析错误热点"}
         </button>
       </div>
+      {invalidated && (
+        <div className="alert alert--info">
+          待检样本或校验契约已变化，上次热点分析结果已失效，请重新分析。
+        </div>
+      )}
       {error && <div className="alert alert--err">{error}</div>}
 
       {result && (
