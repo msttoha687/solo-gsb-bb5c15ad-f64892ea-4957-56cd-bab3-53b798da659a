@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeHotspots } from "../api.js";
 
 // Keep in sync with MAX_SAMPLES in server/hotspot.js.
@@ -21,22 +21,39 @@ function clusterKey(cluster) {
 export default function HotspotPanel({ schema, target = "infer" }) {
   const [text, setText] = useState("");
   const [parseError, setParseError] = useState(null);
-  const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
+  // Bound to the submitted samples text and the active contract (target +
+  // schema content); renders only while both still match the current state.
+  const [outcome, setOutcome] = useState(null); // { key, ok, data?, message? }
   const [openKey, setOpenKey] = useState(null);
 
-  // Schema changed (re-inferred, or the validate target switched): the
-  // previous clusters no longer reflect the current contract, so drop them.
+  // Content-based contract signature: re-inferring a changed schema or
+  // switching infer/variant invalidates the bound clusters.
+  const contractKey = useMemo(
+    () => (schema ? `${target} ${JSON.stringify(schema)}` : null),
+    [target, schema]
+  );
+  const bindKey = contractKey === null ? null : `${contractKey} ${text}`;
+
+  // Monotonic request id for staleness checks (see ValidatePanel).
+  const seqRef = useRef(0);
+
+  // The samples text, the schema (re-inferred) or the validate target
+  // changed: drop the previous clusters/error at once and invalidate any
+  // in-flight analysis, whose late success/failure response is ignored.
   useEffect(() => {
-    setResult(null);
-    setError(null);
+    seqRef.current += 1;
+    setBusy(false);
+    setOutcome(null);
     setOpenKey(null);
-  }, [schema]);
+  }, [bindKey]);
+
+  const current = outcome && outcome.key === bindKey ? outcome : null;
+  const result = current && current.ok ? current.data : null;
+  const error = current && !current.ok ? current.message : null;
 
   async function runAnalysis() {
-    setError(null);
-    setResult(null);
+    setOutcome(null);
     setOpenKey(null);
     let samples;
     try {
@@ -47,22 +64,32 @@ export default function HotspotPanel({ schema, target = "infer" }) {
       return;
     }
     if (!Array.isArray(samples)) {
-      setError('输入必须是 JSON 数组：每个元素为一条待检样本，例如 [{"id": 1}, {"id": 2}]。');
+      setOutcome({
+        key: bindKey,
+        ok: false,
+        message: '输入必须是 JSON 数组：每个元素为一条待检样本，例如 [{"id": 1}, {"id": 2}]。',
+      });
       return;
     }
     if (samples.length > MAX_SAMPLES) {
-      setError(
-        `单次最多分析 ${MAX_SAMPLES} 条样本，当前输入共 ${samples.length} 条，请分批分析。`
-      );
+      setOutcome({
+        key: bindKey,
+        ok: false,
+        message: `单次最多分析 ${MAX_SAMPLES} 条样本，当前输入共 ${samples.length} 条，请分批分析。`,
+      });
       return;
     }
+    const seq = (seqRef.current += 1);
     setBusy(true);
     try {
-      setResult(await analyzeHotspots(schema, samples));
+      const data = await analyzeHotspots(schema, samples);
+      if (seq !== seqRef.current) return;
+      setOutcome({ key: bindKey, ok: true, data });
     } catch (e) {
-      setError(e.message);
+      if (seq !== seqRef.current) return;
+      setOutcome({ key: bindKey, ok: false, message: e.message });
     } finally {
-      setBusy(false);
+      if (seq === seqRef.current) setBusy(false);
     }
   }
 
@@ -84,7 +111,11 @@ export default function HotspotPanel({ schema, target = "infer" }) {
       <textarea
         className={`code-input ${parseError ? "code-input--err" : ""}`}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          // The stale parse error belongs to the previous text.
+          setParseError(null);
+        }}
         spellCheck={false}
         rows={6}
         placeholder='[{"id": 1, "tags": ["admin"]}, {"id": "oops", "tags": [42]}]'

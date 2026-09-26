@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { validateSample } from "../api";
 import { DEFAULT_VALIDATE_SAMPLE } from "../defaultSamples";
 import HotspotPanel from "./HotspotPanel.jsx";
@@ -11,17 +11,43 @@ const TARGET_META = {
 export default function ValidatePanel({ schema, variantSchema, target = "infer", onTargetChange }) {
   const [text, setText] = useState(DEFAULT_VALIDATE_SAMPLE);
   const [parseError, setParseError] = useState(null);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
+  // The outcome is bound to the exact inputs submitted: sample text plus the
+  // active contract (target + schema content). It renders only while the
+  // signature still matches the current editor/contract state.
+  const [outcome, setOutcome] = useState(null); // { key, ok, data?, message? }
   const [busy, setBusy] = useState(false);
 
   // Fall back to the inferred contract when no variant contract is available.
   const activeTarget = target === "variant" && variantSchema ? "variant" : "infer";
   const activeSchema = activeTarget === "variant" ? variantSchema : schema;
 
+  // Content-based contract signature: re-inferring a changed schema or
+  // switching infer/variant invalidates the bound result.
+  const contractKey = useMemo(
+    () => (activeSchema ? `${activeTarget} ${JSON.stringify(activeSchema)}` : null),
+    [activeTarget, activeSchema]
+  );
+  const bindKey = contractKey === null ? null : `${contractKey} ${text}`;
+
+  // Monotonic request id: every submission and every input/contract change
+  // advances it, so a response arriving after either is provably stale.
+  const seqRef = useRef(0);
+
+  // The sample text, the inferred schema or the validate target changed:
+  // drop the previous result/error at once and invalidate any in-flight
+  // request, whose late success/failure response must not be shown.
+  useEffect(() => {
+    seqRef.current += 1;
+    setBusy(false);
+    setOutcome(null);
+  }, [bindKey]);
+
+  const current = outcome && outcome.key === bindKey ? outcome : null;
+  const result = current && current.ok ? current.data : null;
+  const requestError = current && !current.ok ? current.message : null;
+
   async function runValidate() {
-    setError(null);
-    setResult(null);
+    setOutcome(null);
     let sample;
     try {
       sample = JSON.parse(text);
@@ -30,13 +56,19 @@ export default function ValidatePanel({ schema, variantSchema, target = "infer",
       setParseError(e.message);
       return;
     }
+    const seq = (seqRef.current += 1);
     setBusy(true);
     try {
-      setResult(await validateSample(activeSchema, sample));
+      const data = await validateSample(activeSchema, sample);
+      // Ignore responses of earlier requests: inputs or contract changed,
+      // or a newer submission superseded this one.
+      if (seq !== seqRef.current) return;
+      setOutcome({ key: bindKey, ok: true, data });
     } catch (e) {
-      setError(e.message);
+      if (seq !== seqRef.current) return;
+      setOutcome({ key: bindKey, ok: false, message: e.message });
     } finally {
-      setBusy(false);
+      if (seq === seqRef.current) setBusy(false);
     }
   }
 
@@ -78,7 +110,11 @@ export default function ValidatePanel({ schema, variantSchema, target = "infer",
         <textarea
           className={`code-input ${parseError ? "code-input--err" : ""}`}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            // The stale parse error belongs to the previous text.
+            setParseError(null);
+          }}
           spellCheck={false}
           rows={12}
         />
@@ -88,7 +124,7 @@ export default function ValidatePanel({ schema, variantSchema, target = "infer",
         </button>
       </div>
 
-      {error && <div className="alert alert--err">{error}</div>}
+      {requestError && <div className="alert alert--err">{requestError}</div>}
 
       {result && (
         <div className="validate-result">

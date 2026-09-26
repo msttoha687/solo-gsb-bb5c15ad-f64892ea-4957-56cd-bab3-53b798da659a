@@ -38,10 +38,22 @@ docker compose up --build
 启动后访问：**http://localhost:8080**（Web 界面与 API 同端口，API 前缀 `/api`，
 如 `POST http://localhost:8080/api/infer`、`POST http://localhost:8080/api/hotspots`）。
 
+**必要配置**：无需任何额外配置或外部依赖（镜像内已完成依赖安装、前端构建与后端启动）。
+唯一可配置项是环境变量 `PORT`（默认 `8080`，见 `docker-compose.yml`）；如修改端口，
+需同步调整 compose 的端口映射（`"宿主端口:容器端口"`）。
+
 > 依赖安装、前端构建、后端运行全部包含在该命令内，无需任何本地环境（除 Docker）。
 > 不使用 Compose 时亦可：`docker build -t json-contract-studio . && docker run -p 8080:8080 json-contract-studio`
 
 停止：`docker compose down`。
+
+| 项目 | 值 |
+| --- | --- |
+| 启动命令 | `docker compose up --build`（停止：`docker compose down`） |
+| 访问地址 | http://localhost:8080 |
+| API 前缀 | `/api`（与 Web 界面同端口，如 `/api/validate`、`/api/hotspots`） |
+| 可选配置 | 环境变量 `PORT`（默认 `8080`，需同步调整 compose 端口映射） |
+| 本地开发 | `npm run setup` 后分别 `npm run dev:server`（8080）与 `npm run dev:client`（5173），见「本地开发」 |
 
 ## 功能与归纳规则
 
@@ -58,13 +70,16 @@ docker compose up --build
   贡献该规则的样本路径（`#/<样本序号>/<路径>`，RFC 6901 转义）。
 - **复制 Schema**：一键复制完整 Schema JSON 到剪贴板。
 - **校验新样本**：基于 Ajv（`allErrors`），错误按 JSON Pointer（如 `/tags/0`）展示，
-  并附带关键字、信息与对应规则路径。
+  并附带关键字、信息与对应规则路径。结果与**提交时的样本文本和校验契约**绑定：修改待检 JSON、
+  重新归纳 Schema 或切换归纳/变体契约后，旧结果与旧错误立即清空；请求尚未返回时发生上述变更，
+  过期请求的成功或失败响应都会被忽略，不会回填，界面只展示匹配当前输入与契约的最近一次结果。
 - **错误热点**：在「③ 校验新样本」页粘贴一个 JSON 数组作为待检样本集（最多 200 条），
   服务端用当前校验目标（归纳 Schema 或事件变体契约）逐条校验，把 Ajv 错误按
   **schemaPath + keyword** 聚簇——同一规则在不同数组下标的报错归为一簇，但 `required`
   按 `missingProperty`、`additionalProperties` 按 `additionalProperty` 分簇；每簇给出
   受影响样本数、错误次数、样本索引与原始实例 Pointer，按受影响样本数降序展示、可展开详情；
-  Schema 变化时旧结果自动清空。
+  修改待检样本、重新归纳 Schema 或切换校验目标后，旧聚簇结果与错误立即清空，进行中的旧请求
+  响应也会被忽略，只保留匹配当前输入与契约的最近一次分析。
 - **样本贡献度**：在「① 样本输入」区一键做留一法分析——逐条移除样本并重新归纳 Schema，
   与完整样本集的归纳结果按规范化后的规则对比，判定每条样本为**关键**（移除后规则变化）
   或**冗余**（移除后规则完全一致），并列出受影响的 JSON Pointer；结果区展示关键/冗余数量，
@@ -178,7 +193,9 @@ Ajv（`allErrors`）把每条样本对当前校验目标逐条校验，再把全
 - 汇总区给出样本总数、通过/失败数、错误总数与簇数；全部通过时明确提示没有错误热点。
 - 输入非 JSON 数组或超过 200 条时前端在提交前拦截，接口同样返回 `400` 及明确错误信息；
   Schema 无法编译返回 `422`。
-- 重新归纳 Schema 或切换校验目标后，旧聚簇结果自动失效清空，需重新分析。
+- 修改待检样本、重新归纳 Schema 或切换校验目标后，旧聚簇结果与错误立即清空；分析请求
+  尚未返回时变更输入或契约，过期响应（无论成功或失败）一律忽略，仅展示匹配当前输入与
+  契约的最近一次结果，需重新分析。
 
 ## 反例构造：规则与判定方向
 
